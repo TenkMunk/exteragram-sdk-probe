@@ -1,0 +1,359 @@
+# -*- coding: utf-8 -*-
+"""
+exteraGram SDK / environment probe -- diagnostic only.
+
+Purpose: report the REAL shape of the exteraGram + Chaquopy API as seen from
+inside the app, so the ios_peek_menu plugin can be written against facts
+instead of assumptions. It observes the first ChatMessageCell.onLongPress,
+then gathers SDK/class/method metadata and attempts to show a report. It does
+not suppress Telegram's native menu or read message text. Keep it enabled only
+while diagnosing.
+
+How to use:
+  1. Install & enable this plugin.
+  2. Open any chat and long-press a message once; the report runs automatically.
+  3. Read /sdcard/Download/extera_probe_report.txt or copy it from logcat.
+  4. Review the report before sharing. Runtime method details can identify the
+     app build even though chat and message content are omitted.
+"""
+
+from typing import Any, List
+
+__id__ = "extera_probe"
+__name__ = "exteraGram SDK Probe"
+__description__ = "One-shot diagnostic probe for SDK/runtime shape. Does not suppress Telegram's native menu."
+__author__ = "@tenkmunk"
+__version__ = "1.0.2"
+__icon__ = "exteraPlugins/1"
+__min_version__ = "11.12.0"
+__app_version__ = ">=12.5.1"
+__sdk_version__ = ">=1.4.4.3"
+
+_LINES: List[str] = []
+
+
+def _out(s: str = "") -> None:
+    _LINES.append(s)
+
+
+def _safe(label: str, fn) -> str:
+    """Evaluate fn(), report the result or the exact exception."""
+    try:
+        value = fn()
+    except Exception as e:
+        return f"{label}: !! {type(e).__name__}: {e}"
+    if value is None:
+        return f"{label}: None"
+    text = repr(value)
+    if len(text) > 200:
+        text = text[:200] + "..."
+    return f"{label}: {text}"
+
+
+def _safe_type(label: str, fn) -> str:
+    """Report only a live app object's type, never its repr or contents."""
+    try:
+        value = fn()
+    except Exception as e:
+        return f"{label}: !! {type(e).__name__}"
+    if value is None:
+        return f"{label}: None"
+    try:
+        return f"{label}: {type(value).__name__}"
+    except Exception:
+        return f"{label}: <type unavailable>"
+
+
+def _describe(obj: Any, label: str) -> None:
+    """List the attributes a hook param / module actually exposes."""
+    try:
+        names = sorted(dir(obj))
+    except Exception as e:
+        _out(f"{label}: !! dir() failed: {type(e).__name__}: {e}")
+        return
+    _out(f"{label} ({len(names)} attrs): {', '.join(names)}")
+
+
+def _write_to_file(text: str) -> str:
+    """Best-effort write to Downloads so the report survives a screenshot."""
+    try:
+        from java.io import File, FileOutputStream
+        from java.lang import String
+        from java.nio.charset import StandardCharsets
+
+        path = "/sdcard/Download/extera_probe_report.txt"
+        f = File(path)
+        fos = FileOutputStream(f)
+        fos.write(String(text).getBytes(StandardCharsets.UTF_8))
+        fos.flush()
+        fos.close()
+        return path
+    except Exception as e:
+        return f"(file write failed: {type(e).__name__}: {e})"
+
+
+def _show_dialog(text: str) -> None:
+    """Show the report. Try several known entry points."""
+    from org.telegram.messenger import AndroidUtilities
+
+    shown = False
+    for name in ("showSimpleAlertDialog", "showAlertDialog"):
+        fn = getattr(AndroidUtilities, name, None)
+        if not callable(fn):
+            continue
+        try:
+            # signature varies between builds; try the common shapes
+            try:
+                fn(AndroidUtilities.getApplicationContext(), "SDK Probe", text, 0)
+            except Exception:
+                try:
+                    fn(AndroidUtilities.getApplicationContext(), "SDK Probe", text)
+                except Exception:
+                    continue
+            shown = True
+            break
+        except Exception:
+            continue
+    if not shown:
+        print("PROBE REPORT (no dialog available):\n" + text)
+
+
+def run_probe(sample_cell: Any = None) -> str:
+    _LINES.clear()
+    _out("=== exteraGram SDK PROBE ===")
+
+    # ---------------------------------------------------------- 1. modules
+    _out("")
+    _out("-- module availability --")
+    mods = [
+        "base_plugin", "ui.settings", "hook_utils", "android_utils",
+        "client_utils", "java", "android.view", "android.view.animation",
+        "android.widget", "android.graphics", "android.os",
+        "org.telegram.messenger", "org.telegram.ui.ActionBar",
+    ]
+    for name in mods:
+        try:
+            __import__(name)
+            _out(f"  {name}: OK")
+        except Exception as e:
+            _out(f"  {name}: !! {type(e).__name__}: {e}")
+
+    # ---------------------------------------------------- 2. plugin base API
+    _out("")
+    _out("-- base_plugin surface --")
+    try:
+        from base_plugin import BasePlugin, MethodHook
+
+        _describe(BasePlugin, "  BasePlugin")
+        _out("")
+        _describe(MethodHook, "  MethodHook")
+    except Exception as e:
+        _out(f"  !! {type(e).__name__}: {e}")
+
+    # --------------------------------------------------- 3. hook param shape
+    _out("")
+    _out("-- method hook param shape --")
+    # If the SDK exposes the param class, describe it. Otherwise the hook
+    # below reports it live.
+    try:
+        from base_plugin import MethodHook as _MH
+        import base_plugin as _bp
+        found = [n for n in dir(_bp) if 'aram' in n or 'ook' in n]
+        _out(f"  base_plugin hook-related names: {found}")
+    except Exception as e:
+        _out(f"  !! {type(e).__name__}: {e}")
+
+    # ------------------------------------------------------ 4. hook_utils
+    _out("")
+    _out("-- hook_utils --")
+    try:
+        import hook_utils
+        _describe(hook_utils, "  hook_utils")
+        _out("  " + _safe("find_class(ChatActivity)", lambda: hook_utils.find_class("org.telegram.ui.ChatActivity")))
+        _out("  " + _safe("find_class(ChatMessageCell)", lambda: hook_utils.find_class("org.telegram.ui.Cells.ChatMessageCell")))
+    except Exception as e:
+        _out(f"  !! {type(e).__name__}: {e}")
+
+    # -------------------------------------------------- 5. android_utils
+    _out("")
+    _out("-- android_utils --")
+    try:
+        import android_utils
+        _describe(android_utils, "  android_utils")
+        _out("  " + _safe("run_on_ui_thread arity", lambda: android_utils.run_on_ui_thread.__code__.co_argcount))
+        _out("  " + _safe("R exists", lambda: hasattr(android_utils, "R")))
+    except Exception as e:
+        _out(f"  !! {type(e).__name__}: {e}")
+
+    # -------------------------------------------------- 6. client_utils
+    _out("")
+    _out("-- client_utils --")
+    try:
+        import client_utils
+        _describe(client_utils, "  client_utils")
+        _out("  " + _safe("get_last_fragment()", lambda: type(client_utils.get_last_fragment()).__name__))
+    except Exception as e:
+        _out(f"  !! {type(e).__name__}: {e}")
+
+    # ---------------------------------------- 7. THE CRITICAL QUESTION: JavaClass
+    _out("")
+    _out("-- Chaquopy JavaClass (this is the bug that broke the peek menu) --")
+    try:
+        import hook_utils
+        JC = hook_utils.find_class("org.telegram.ui.Cells.ChatMessageCell")
+        _out("  find_class returned: " + repr(JC))
+        _out("  type: " + type(JC).__name__)
+        for attr in ("__name__", "name", "getName", "isInstance",
+                     "isAssignableFrom", "getClass", "java_class"):
+            try:
+                v = getattr(JC, attr)
+                if callable(v):
+                    try:
+                        v = v()
+                    except Exception as e:
+                        v = f"<callable, call raised {type(e).__name__}>"
+                _out(f"  JC.{attr} -> {v!r}")
+            except Exception as e:
+                _out(f"  JC.{attr} -> !! {type(e).__name__}: {e}")
+        # Compare the two checks against the actual ChatMessageCell that
+        # triggered this one-shot probe. `object()` vs type(JC) only tests
+        # Python wrapper types and says nothing about Java instance checks.
+        if JC is None or sample_cell is None:
+            _out("  live ChatMessageCell instance checks: unavailable")
+        else:
+            try:
+                _out(f"  isinstance(live_cell, JC) -> {isinstance(sample_cell, JC)}")
+            except Exception as e:
+                _out(f"  isinstance(live_cell, JC) -> !! {type(e).__name__}")
+            try:
+                _out(f"  JC.isInstance(live_cell) -> {bool(JC.isInstance(sample_cell))}")
+            except Exception as e:
+                _out(f"  JC.isInstance(live_cell) -> !! {type(e).__name__}")
+    except Exception as e:
+        _out(f"  !! {type(e).__name__}: {e}")
+
+    # ------------------------------- 8. ViewGroup name check (show() gate)
+    _out("")
+    _out("-- android.view.ViewGroup --")
+    try:
+        from android.view import ViewGroup
+        _out("  ViewGroup: " + repr(ViewGroup))
+        _out("  __name__: " + repr(getattr(ViewGroup, "__name__", "<none>")))
+    except Exception as e:
+        _out(f"  !! {type(e).__name__}: {e}")
+
+    # ------------------------------------------- 9. Telegram class presence
+    _out("")
+    _out("-- key Telegram classes (None = absent) --")
+    for fq in (
+        "org.telegram.ui.ChatActivity",
+        "org.telegram.ui.Cells.ChatMessageCell",
+        "org.telegram.ui.Components.RecyclerListView",
+        "org.telegram.ui.Components.Reactions.ReactionsLayoutInBubble$VisibleReaction",
+        "org.telegram.messenger.UserConfig",
+    ):
+        try:
+            import hook_utils
+            _out(f"  {fq}: {hook_utils.find_class(fq)}")
+        except Exception as e:
+            _out(f"  {fq}: !! {type(e).__name__}: {e}")
+
+    # ------------------------------------------- 10. live object types
+    _out("")
+    _out("-- live object types (safe runtime shape, no object contents) --")
+    try:
+        from client_utils import get_last_fragment
+        frag = get_last_fragment()
+        _out("  fragment: " + (type(frag).__name__ if frag is not None else "None"))
+        if frag is not None:
+            _out("  " + _safe_type("getParentActivity()", lambda: frag.getParentActivity()))
+            _out("  " + _safe_type("fragment.getChat()", lambda: frag.getChat()))
+            _out("  " + _safe("fragment.actionBar available", lambda: hasattr(frag, "actionBar")))
+            _out("  " + _safe_type("fragment.getFragmentView()", lambda: frag.getFragmentView()))
+            _out("  " + _safe_type("getChatListView()", lambda: frag.getChatListView()))
+            _out("  " + _safe_type("getUserConfig()", lambda: frag.getUserConfig()))
+    except Exception as e:
+        _out(f"  !! {type(e).__name__}")
+
+    # ---------------------------------- 11. selectReaction arity (menu action)
+    _out("")
+    _out("-- ChatActivity.selectReaction overloads (reaction dispatch) --")
+    try:
+        from java.lang import Class as JClass
+        CA = None
+        import hook_utils
+        CA = hook_utils.find_class("org.telegram.ui.ChatActivity")
+        for m in CA.getDeclaredMethods():
+            if "selectReaction" in str(m.getName()):
+                _out(f"  {m}")
+    except Exception as e:
+        _out(f"  !! {type(e).__name__}: {e}")
+
+    _out("")
+    _out("-- ChatActivity.processSelectedOption overloads (menu actions) --")
+    try:
+        import hook_utils
+        CA = hook_utils.find_class("org.telegram.ui.ChatActivity")
+        for m in CA.getDeclaredMethods():
+            if "processSelectedOption" in str(m.getName()):
+                _out(f"  {m}")
+    except Exception as e:
+        _out(f"  !! {type(e).__name__}: {e}")
+
+    _out("")
+    _out("=== END PROBE ===")
+    report = "\n".join(_LINES)
+    path = _write_to_file(report)
+    _out(f"\n(written to {path})")
+    return "\n".join(_LINES)
+
+
+# --------------------------------------------------------------------------
+# Observe the first long-press without touching its result. The diagnostic
+# scan currently runs inline here, so keep this plugin enabled only briefly.
+# --------------------------------------------------------------------------
+
+from base_plugin import BasePlugin, MethodHook  # noqa: E402
+from hook_utils import find_class  # noqa: E402
+
+
+class ProbeLongPressHook(MethodHook):
+    def __init__(self, plugin):
+        super().__init__()
+        self.plugin = plugin
+
+    def before_hooked_method(self, param) -> None:
+        # Report on the FIRST long press only.
+        if getattr(self.plugin, "_probed", False):
+            return
+        self.plugin._probed = True
+        try:
+            report = run_probe(getattr(param, "thisObject", None))
+            print(report)
+            _show_dialog(report)
+        except Exception as e:
+            message = f"PROBE FAILED: {type(e).__name__}"
+            print(message)
+            _show_dialog(message)
+        # Never suppress the native long press.
+        return
+
+
+class ProbePlugin(BasePlugin):
+    def create_settings(self) -> List[Any]:
+        return []
+
+    def on_plugin_load(self) -> None:
+        self._probed = False
+        try:
+            Cell = find_class("org.telegram.ui.Cells.ChatMessageCell")
+            if Cell is not None:
+                self.hook_all_methods(Cell, "onLongPress", ProbeLongPressHook(self))
+                self.log("extera_probe: hooked onLongPress")
+        except Exception as e:
+            self.log(f"extera_probe hook failed: {e}")
+            import traceback
+            print("extera_probe hook setup failed:\n" + traceback.format_exc())
+
+    def on_plugin_unload(self) -> None:
+        self.log("extera_probe unloaded")
